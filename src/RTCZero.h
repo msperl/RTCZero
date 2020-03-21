@@ -90,7 +90,7 @@ public:
   };
 
   RTCZero();
-  void begin(bool resetTime = false, uint8_t rtc_mode = 2, bool clearOnMatch = false, Prescaler prescale = None);
+  void begin(bool resetTime = false, uint8_t rtc_mode = 2, bool clearOnMatch = false, Prescaler prescale = None, uint8_t gclk_prescale = 4);
 
   void enableAlarm(Alarm_Match match);
   void disableAlarm();
@@ -175,7 +175,7 @@ private:
   bool _configured;
 
   void config32kOSC(void);
-  void configureClock(void);
+  void configureClock(uint8_t gclk_div);
   void RTCreadRequest();
   bool RTCisSyncing(void);
   void RTCdisable();

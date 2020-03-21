@@ -42,7 +42,7 @@ RTCZero::RTCZero()
   _configured = false;
 }
 
-void RTCZero::begin(bool resetTime, uint8_t mode, bool clearOnMatch, Prescaler prescale)
+void RTCZero::begin(bool resetTime, uint8_t mode, bool clearOnMatch, Prescaler prescale, uint8_t gclk_prescale)
 {
   uint16_t tmp_reg = 0;
   rtc_mode = mode;
@@ -87,10 +87,11 @@ void RTCZero::begin(bool resetTime, uint8_t mode, bool clearOnMatch, Prescaler p
         mode2_oldTime.reg = RTC->MODE2.CLOCK.reg;
       }
     }
+    // as we are in RTC mode: use gclk prescale divider of 32 regardless of what is given as method argument
+    gclk_prescale = 4;
   }
 
-  // Setup clock GCLK2 with OSC32K divided by 32
-  configureClock();
+  configureClock(gclk_prescale);
 
   RTCdisable();
 
@@ -648,8 +649,8 @@ void RTCZero::setY2kEpoch(uint32_t ts)
 }
 
 /* Attach peripheral clock to 32k oscillator */
-void RTCZero::configureClock() {
-  GCLK->GENDIV.reg = GCLK_GENDIV_ID(2)|GCLK_GENDIV_DIV(4);
+void RTCZero::configureClock(uint8_t gclk_div) {
+  GCLK->GENDIV.reg = GCLK_GENDIV_ID(2)|GCLK_GENDIV_DIV(gclk_div);
   while (GCLK->STATUS.reg & GCLK_STATUS_SYNCBUSY)
     ;
 #ifdef CRYSTALLESS
