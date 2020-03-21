@@ -40,7 +40,7 @@ RTCZero::RTCZero()
   _configured = false;
 }
 
-void RTCZero::begin(bool resetTime, uint8_t mode, bool clearOnMatch, Prescaler prescale)
+void RTCZero::begin(bool resetTime, uint8_t mode, bool clearOnMatch, uint32_t prescale)
 {
   uint16_t tmp_reg = 0;
   rtc_mode = mode;
@@ -48,10 +48,18 @@ void RTCZero::begin(bool resetTime, uint8_t mode, bool clearOnMatch, Prescaler p
   RTC_MODE0_COUNT_Type mode0_oldCount;
   RTC_MODE1_COUNT_Type mode1_oldCount;
   RTC_MODE2_CLOCK_Type mode2_oldTime;
+
+  uint32_t rtc_prescale, gclk_prescale;
+
+  /* defaults for prescale - for mode 2 divider has to be 32768 */
+  if ((prescale == 0) || (rtc_mode == 2))
+    prescale = 32768;
+
+  /* compute the individual scalers based on the requested prescale */
+  computeDivider(prescale, &rtc_prescale, &gclk_prescale);
   
   PM->APBAMASK.reg |= PM_APBAMASK_RTC; // turn on digital interface clock
   config32kOSC();
-
 
   if (rtc_mode==0) {
     // If the RTC is in 32-bit counter mode and the reset was
@@ -87,17 +95,17 @@ void RTCZero::begin(bool resetTime, uint8_t mode, bool clearOnMatch, Prescaler p
     }
   }
 
-  // Setup clock GCLK2 with OSC32K divided by 32
-  configureClock();
+  configureClock(gclk_prescale);
 
   RTCdisable();
 
   RTCreset();
 
+  int bit_set = 31 - __builtin_clzl(rtc_prescale);
+
   if (rtc_mode==0) {
-    if (prescale==None) prescale = MODE0_DIV1024;   // set prescaler default to 1024
     tmp_reg |= RTC_MODE0_CTRL_MODE_COUNT32;         // set 32-bit counter operating mode
-    tmp_reg |= prescale;                            // set prescaler
+    tmp_reg |= RTC_MODE0_CTRL_PRESCALER(bit_set);   // set prescaler
     
     if (clearOnMatch==true) tmp_reg |= RTC_MODE0_CTRL_MATCHCLR;     // enable clear on match
     else tmp_reg &= ~RTC_MODE0_CTRL_MATCHCLR;                       // disable clear on match
@@ -107,18 +115,16 @@ void RTCZero::begin(bool resetTime, uint8_t mode, bool clearOnMatch, Prescaler p
     RTC->MODE0.CTRL.reg = tmp_reg;
   }
   else if (rtc_mode==1) {
-    if (prescale==None) prescale = MODE1_DIV1024;   // set prescaler default to 1024
     tmp_reg |= RTC_MODE1_CTRL_MODE_COUNT16;         // set 16-bit counter operating mode
-    tmp_reg |= prescale;                            // set prescaler
+    tmp_reg |= RTC_MODE1_CTRL_PRESCALER(bit_set);   // set prescaler
 
     RTC->MODE1.READREQ.reg &= ~RTC_READREQ_RCONT;   // disable continuously mode
 
     RTC->MODE1.CTRL.reg = tmp_reg;
   }
   else {
-    if (prescale==None) prescale = MODE2_DIV1024;   // set prescaler default to 1024
     tmp_reg |= RTC_MODE2_CTRL_MODE_CLOCK;           // set clock operating mode
-    tmp_reg |= prescale;                            // set prescaler
+    tmp_reg |= RTC_MODE2_CTRL_PRESCALER(bit_set);   // set prescaler
     tmp_reg &= ~RTC_MODE2_CTRL_MATCHCLR;            // disable clear on match
     
     //According to the datasheet RTC_MODE2_CTRL_CLKREP = 0 for 24h
@@ -645,15 +651,69 @@ void RTCZero::setY2kEpoch(uint32_t ts)
   }
 }
 
+void RTCZero::computeDivider(uint32_t prescale, uint32_t *rtc_prescale, uint32_t *gclk_prescale)
+{
+  uint32_t rtc_prescale_shift;
+
+  /* preferred prescaler to get 1Hz - needed to get ctzl work corrected */
+  if (prescale == 0)
+    prescale = 32768;
+
+  /* compute the last trailing zero */
+  int zeros_trailing = __builtin_ctzl(prescale);
+  int zeros_leading = __builtin_clzl(prescale);
+  int bits = 32 - zeros_leading - zeros_trailing;
+
+  /* so we use as many of the trailing zeros for rtc_div - that is up to a divider of 1024  */
+  rtc_prescale_shift = min(zeros_trailing, 10);
+  *rtc_prescale = 1 << rtc_prescale_shift;
+  *gclk_prescale = prescale >> rtc_prescale_shift;
+
+  /* now modify the prescaler to something close
+   * note that this explicitly assumes GCLK2 with 5 bits of divider
+   */
+  if ( (*gclk_prescale > 31) && (bits > 1)) {
+    /* first shift bits to rtc_prescale before trying anything else */
+    while ((*rtc_prescale < 1024) && (*gclk_prescale >= 32)) {
+      /* we essentially round prescale down here*/
+      *rtc_prescale <<= 1;
+      *gclk_prescale >>= 1;
+    }
+
+    /* if the prescale is >= 32 then do some more rounding to the next full single bit value
+     * note that with gclk_prescale already a power of 2 we should not get valled in the first place
+     */
+    if (*gclk_prescale >= 32) {
+      /* so now use the highest bit set for the divider - there could be some rounding... */
+      *gclk_prescale = 1 << (31 - __builtin_clzl(*gclk_prescale));
+    }
+  }
+
+  /* set the effective prescaler */
+  effective_prescaler = *rtc_prescale * *gclk_prescale;
+}
+
 /* Attach peripheral clock to 32k oscillator */
-void RTCZero::configureClock() {
-  GCLK->GENDIV.reg = GCLK_GENDIV_ID(2)|GCLK_GENDIV_DIV(4);
+void RTCZero::configureClock(uint32_t gclk_div) {
+  uint32_t div_sel, div;
+  // decide which devider we want to use
+  if (gclk_div < 32) {
+    div_sel = 0;
+    div = gclk_div;
+    // uneven dividers are OK here...
+  } else {
+    /* power of 2 divider */
+    div_sel = GCLK_GENCTRL_DIVSEL;
+    div = __builtin_ctzl(gclk_div) - 1;
+  }
+
+  GCLK->GENDIV.reg = GCLK_GENDIV_ID(2)|GCLK_GENDIV_DIV(div);
   while (GCLK->STATUS.reg & GCLK_STATUS_SYNCBUSY)
     ;
 #ifdef CRYSTALLESS
-  GCLK->GENCTRL.reg = (GCLK_GENCTRL_GENEN | GCLK_GENCTRL_SRC_OSCULP32K | GCLK_GENCTRL_ID(2) | GCLK_GENCTRL_DIVSEL );
+  GCLK->GENCTRL.reg = (GCLK_GENCTRL_GENEN | GCLK_GENCTRL_SRC_OSCULP32K | GCLK_GENCTRL_ID(2) | div_sel);
 #else
-  GCLK->GENCTRL.reg = (GCLK_GENCTRL_GENEN | GCLK_GENCTRL_SRC_XOSC32K | GCLK_GENCTRL_ID(2) | GCLK_GENCTRL_DIVSEL );
+  GCLK->GENCTRL.reg = (GCLK_GENCTRL_GENEN | GCLK_GENCTRL_SRC_XOSC32K | GCLK_GENCTRL_ID(2) | div_sel);
 #endif
   while (GCLK->STATUS.reg & GCLK_STATUS_SYNCBUSY)
     ;
